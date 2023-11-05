@@ -7,6 +7,7 @@ SYS_MMAP            equ 9
 SYS_MUNMAP          equ 11
 SYS_NANOSLEEP       equ 35
 SYS_EXIT            equ 60
+SYS_MMAP2           equ 192
 SYS_CLOCK_NANOSLEEP equ 230
 SYS_CLOCK_GET_TIME  equ 228
 
@@ -21,7 +22,11 @@ ASCII_ESCAPE equ 27
 FULL_CELL equ 88
 EMPTY_CELL equ 32
 
-MAP_ANONYMOUS equ 0x10
+; TODO: This might be the wrong flag, and definitely also needs a MAP_PRIVATE
+MAP_ANONYMOUS equ 0x20
+MAP_PRIVATE   equ 0x02
+PROT_READ     equ 1
+PROT_WRITE    equ 2
 
 WIDTH     equ 80
 HEIGHT    equ 30
@@ -34,12 +39,12 @@ _start:
   call clear_screen
 
   ; Allocate storage for our world
-  mov rcx, SIZE
+  mov rcx, qword SIZE
   call malloc
   mov qword[world], rax
 
   ; Allocate storage for the update process
-  mov rcx, SIZE
+  mov rcx, qword SIZE
   call malloc
   mov qword[world_after_update], rax
 
@@ -77,8 +82,10 @@ _start:
   call exit_ok
 
 update_world:
-  ; r12 is our loop iterator
   push r12
+  push rbx
+
+  ; r12 is our loop iterator
   mov r12, 0
 
   .loopstart:
@@ -104,7 +111,6 @@ update_world:
   mov r11, rax
    
   ; We use rbx to accumulate the number of living neighbours
-  push rbx
   mov rbx, 0
 
   ; top left
@@ -196,8 +202,8 @@ update_world:
 
   ; write the new cell state into the world_after_update array
   mov rdx, r12
-  add r12, world_after_update
-  mov [r12], rcx 
+  add rdx, [world_after_update]
+  mov byte [rdx], cl
   
   ; increase our loop counter
   inc r12
@@ -239,24 +245,26 @@ lookup_cell:
   add rax, [world]
   
   ; load the memory at the address
-  mov rax, [rax]
+  xor rcx, rcx 
+  mov cl, byte[rax]
+  mov rax, rcx
 
   ; map the two CELL_FULL and CELL_EMPTY values to 0 and 1
   sub rax, EMPTY_CELL 
 
   ; set the zero flag
-  test rax, rax
+  cmp rax, 0
 
   ; using a jump here is not the nicest, an alternative would be a division
   ; by FULL_CELL
   jz .iszero
 
-  mov rax, 1
+  mov rax, qword 1
   ret
 
   .iszero:
 
-  mov rax, 0
+  mov rax, qword 0
   ret
 
 
@@ -297,7 +305,7 @@ render_world:
   mov rcx, WIDTH
   mul rcx
   ; Add the world start position
-  add rax, world
+  add rax, [world]
   ; move it into rsi
   mov rsi, rax 
 
@@ -370,11 +378,11 @@ malloc:
   ; Allocate SIZE bytes
   mov rsi, rcx
   ; Allocate readable and writeable memory
-  mov rdx, 3
+  mov rdx, PROT_READ | PROT_WRITE
   ; we do not want file backed memory
-  mov r10, MAP_ANONYMOUS
+  mov r10, MAP_ANONYMOUS | MAP_PRIVATE
   ; fd
-  mov r8, 0
+  mov r8, -1
   ; offset
   mov r9, 0
   syscall
@@ -407,7 +415,7 @@ initialize_world:
   ; Determine the offset into the world array
   mov rcx, r13
   ; Add the world start position
-  add rcx, world
+  add rcx, [world]
 
   ; copy the lowest byte of rdx into the array 
   mov byte[rcx], dl 
