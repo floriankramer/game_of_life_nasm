@@ -2,14 +2,19 @@ bits 64
 global _start
 
 ; System Call Numbers
-SYS_WRITE     equ 1
-SYS_MMAP      equ 9
-SYS_MUNMAP    equ 11
-SYS_NANOSLEEP equ 35
+SYS_WRITE           equ 1
+SYS_MMAP            equ 9
+SYS_MUNMAP          equ 11
+SYS_NANOSLEEP       equ 35
+SYS_EXIT            equ 60
 SYS_CLOCK_NANOSLEEP equ 230
-SYS_EXIT      equ 60
+SYS_CLOCK_GET_TIME  equ 228
 
 STDOUT        equ 1
+
+; CLOCK_TYPES from time.h
+CLOCK_REALTIME  equ 0
+CLOCK_MONOTONIC equ 1
 
 ASCII_ESCAPE equ 27
 
@@ -150,7 +155,7 @@ sleep:
   mov qword[sleep_time_nanoseconds], 0
 
   mov rax, SYS_CLOCK_NANOSLEEP
-  mov rdi, 1 ; ClOCK_MONOTONIC
+  mov rdi, CLOCK_MONOTONIC
   mov rsi, 0 ; no flags, relative time
   mov rdx, sleep_time_seconds
   mov r10, 0 ; no output arg
@@ -178,27 +183,92 @@ allocate_world:
   ret
 
 initialize_world:
-  ; we use r11 for our loop index
-  mov r11, 0
+  ; generate a seed
+  call get_random_seed
+  ; store the seed in r10
+  push r12
+  mov r12, rax
+
+  ; we use r13 for our loop index
+  push r13
+  mov r13, 0
 
   .loopstart:
+  ; run the rng to determine the state of the next cell
+  mov rax, r12
+  call xorshift_64
+  mov r12, rax
+
+  ; ro rax %= 2, then map it to EMPTY_CELL and FULL_CELL 
+  and rax, 1
+  mov rdx, FULL_CELL - EMPTY_CELL
+  mul rdx
+  mov rdx, rax
+  add rdx, EMPTY_CELL
 
   ; Determine the offset into the world array
-  mov rcx, r11
+  mov rcx, r13
   ; Add the world start position
   add rcx, world
 
-  ; initilize the data to spaces
-  mov byte[rcx], EMPTY_CELL
+  ; copy the lowest byte of rdx into the array 
+  mov byte[rcx], dl 
 
   ; increment our loop counter
-  inc r11
+  inc r13
 
   ; check if we are done
-  cmp r11, SIZE
+  cmp r13, SIZE
   jne .loopstart
 
+  ; restore non scramble registers
+  pop r13
+  pop r12
+
   ret
+
+; Uses the current time to generate a seed. Stores the seed in rax 
+get_random_seed:
+  ; Allocate 18 bytes of space on the stack for the result
+  push rax
+  push rax
+
+  mov rax, SYS_CLOCK_GET_TIME
+  mov rdi, CLOCK_REALTIME
+  ; The stack grows donwards, so we use the current stack pointer as 
+  ; the place to write
+  mov rsi, rsp 
+  syscall
+  
+  ; The first value is gonna be seconds
+  pop rcx
+  ; The second value is nanoseconds
+  pop rax
+  ; multiply the two and ignore overflow
+  xor rax, rcx
+
+  ; rax now contains the seed
+  ret
+
+; Takes the value in rax as a seed, and applies xorshift64. The result
+; is stored in rax and is both the result and the new seed
+xorshift_64:
+  ; rax ^= rax << 13
+  mov rcx, rax
+  shl rcx, 13
+  xor rax, rcx
+
+  ; rax ^= rax >> 7
+  mov rcx, rax
+  shr rcx, 13
+  xor rax, rcx
+
+  ; rax ^= rax << 17
+  mov rcx, rax
+  shl rcx, 17
+  xor rax, rcx
+  
+  ret  
 
 section .data
 
