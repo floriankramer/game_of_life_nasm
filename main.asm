@@ -35,21 +35,27 @@ _start:
 
   ; Allocate storage for our world
   mov rcx, SIZE
-  call allocate_world
+  call malloc
   mov qword[world], rax
+
+  ; Allocate storage for the update process
+  mov rcx, SIZE
+  call malloc
+  mov qword[world_after_update], rax
 
   ; Initialize the world
   call initialize_world
-  ; For now we just set one cell in the second row to full
-  mov rax, world
-  add rax, 84
-  mov byte[rax], FULL_CELL
+
+  ; render the initial state
+  call render_world
+  call sleep
 
   ; Loop
   mov qword [iterations], 16
   .mainloop:
 
   ; Update the world
+  call update_world
 
   ; Render
   call render_world
@@ -69,6 +75,198 @@ _start:
 
   ; sys_exit
   call exit_ok
+
+update_world:
+  ; r12 is our loop iterator
+  push r12
+  mov r12, 0
+
+  .loopstart:
+  ; We need to look at all neighbours of this cell, and add them up.
+  ; We can then use that number to calculate the new state of the cell.
+  ; 0-1 empty
+  ;   2 survives
+  ;   3 alive
+  ; >=4 dead
+
+  ; split the one-dimensional index into a two dimensional one
+  ; x
+  mov rax, r12
+  mov rcx, WIDTH
+  call modulo
+  mov r10, rax
+ 
+  ; y
+  mov rax, r12
+  mov rcx, WIDTH
+  mov rdx, 0
+  div rcx
+  mov r11, rax
+   
+  ; We use rbx to accumulate the number of living neighbours
+  push rbx
+  mov rbx, 0
+
+  ; top left
+  mov r14, r10
+  sub r14, qword 1
+  mov r15, r11
+  sub r15, qword 1
+  call lookup_cell
+  add rbx, rax
+
+  ; top center
+  mov r14, r10
+  mov r15, r11
+  sub r15, qword 1
+  call lookup_cell
+  add rbx, rax
+
+  ; top right 
+  mov r14, r10
+  add r14, qword 1
+  mov r15, r11
+  sub r15, qword 1
+  call lookup_cell
+  add rbx, rax
+
+  ; center left
+  mov r14, r10
+  sub r14, qword 1
+  mov r15, r11
+  call lookup_cell
+  add rbx, rax
+
+  ; center right 
+  mov r14, r10
+  add r14, qword 1
+  mov r15, r11
+  call lookup_cell
+  add rbx, rax
+
+  ; bottom left
+  mov r14, r10
+  sub r14, qword 1
+  mov r15, r11
+  add r15, qword 1
+  call lookup_cell
+  add rbx, rax
+
+  ; bottom center
+  mov r14, r10
+  mov r15, r11
+  add r15, qword 1
+  call lookup_cell
+  add rbx, rax
+
+  ; bottom right 
+  mov r14, r10
+  add r14, qword 1
+  mov r15, r11
+  add r15, qword 1
+  call lookup_cell
+  add rbx, rax
+
+  ; rbx now contains the number of neighbours
+
+  ; we also need the center state, as a living cell with exactly two neighbours
+  ; survives.
+  ; center center 
+  mov r14, r10
+  mov r15, r11
+  call lookup_cell
+
+  ; assume the reulting cell will be dead
+  mov rcx, EMPTY_CELL 
+
+  ; 0, 1, and 4 and upwards do the same, so subtracting 2 turns this into three
+  ; cases, 0 (keep living), 1 (grow), and the rest (die)
+  sub rbx, 2
+  ; after this or theres only two cases: the lowest bit is 1 and all others 0 (live)
+  ; and the rest 
+  or rbx, rax
+
+  ; after subtracting 1 rbx is now 0 iff the cell should be alive
+  sub rbx, 1
+  jnz .notalive
+
+  mov rcx, FULL_CELL
+
+  .notalive:
+
+  ; write the new cell state into the world_after_update array
+  mov rdx, r12
+  add r12, world_after_update
+  mov [r12], rcx 
+  
+  ; increase our loop counter
+  inc r12
+  cmp r12, SIZE
+  jne .loopstart
+
+  ; Swap world and world after update
+  mov rax, [world]
+  mov rcx, [world_after_update]
+  mov [world], rcx 
+  mov [world_after_update], rax
+
+  pop rbx
+  pop r12
+  ret
+
+; takes in a x and y coordinate in r14 and r15 and returns 1 or 0 in rax depending
+; on the cell's state. Coordinates will be wrapped using modulo operators.
+lookup_cell:
+  ; x 
+  mov rax, r14 
+  mov rcx, WIDTH
+  call modulo
+  mov r14, rax
+  
+  ; y
+  mov rax, r15 
+  mov rcx, HEIGHT
+  call modulo
+  mov r15, rax
+
+  ; combine the 2d index back into a 1d index 
+  mov rax, r15
+  mov rcx, WIDTH
+  mul rcx
+  add rax, r14
+
+  ; turn the index into a memory address
+  add rax, [world]
+  
+  ; load the memory at the address
+  mov rax, [rax]
+
+  ; map the two CELL_FULL and CELL_EMPTY values to 0 and 1
+  sub rax, EMPTY_CELL 
+
+  ; set the zero flag
+  test rax, rax
+
+  ; using a jump here is not the nicest, an alternative would be a division
+  ; by FULL_CELL
+  jz .iszero
+
+  mov rax, 1
+  ret
+
+  .iszero:
+
+  mov rax, 0
+  ret
+
+
+; Calculates rax % rcx and returns the result in rax
+modulo:
+  mov rdx, 0
+  ; div stores the remainder in rdx
+  div rcx
+  mov rax, rdx
+  ret
 
 ; Uses the ansi escape code for clearing the screen until the end
 clear_screen:
@@ -164,7 +362,7 @@ sleep:
   ret
 
 ; Allocate storage for a world of size $rax
-allocate_world:
+malloc:
   ; Ask the kernel for storage
   mov rax, SYS_MMAP
   ; Let the kernel decide where to take the memory from
@@ -296,3 +494,5 @@ iterations resq 1
 
 ; A pointer to mapped memory for the world
 world resq 1
+; an array for storing the worlds new state after an update
+world_after_update resq 1
